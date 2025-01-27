@@ -34,7 +34,7 @@ Or add it to your `pyproject.toml` dependencies (if using Poetry):
 
 ```toml
 [tool.poetry.dependencies]
-embs = "^0.3.1"
+embs = "^0.1.0"
 ```
 
 ## Quick Start
@@ -146,5 +146,3 @@ pytest --asyncio-mode=auto
 ## License
 
 This project is licensed under the **MIT License**. See [LICENSE](./LICENSE) for details.
-
-**Happy Embedding & Ranking!**
