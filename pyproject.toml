@@ -1,0 +1,74 @@
+[tool.poetry]
+name = "embs"
+version = "0.1.0"
+description = "Embs is a Python toolkit for retrieving documents (via Docsifer), generating embeddings (via Lightweight Embeddings API), and ranking texts with an optional caching system."
+authors = ["Hieu Lam <lamhieu.vk@gmail.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.10"
+pytest = "^8.3.4"
+aiohttp = "^3.8.4"
+pytest-asyncio = "^0.25.2"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.pyright]
+include = ["src"]
+ignore = ["**/typings"]
+exclude = [
+    ".*",
+    "__*",
+    "**/typings",
+]
+typeCheckingMode = "basic"
+stubPath = "typings"
+typeshedPath = "typings"
+pythonPlatform = "Linux"
+reportGeneralTypeIssues = false
+reportAssignmentType = false
+reportMissingModuleSource = false
+
+[project]
+license = "MIT"
+keywords = [
+  "embs",
+  "docsifer",
+  "embeddings",
+  "ranking",
+  "document-retrieval",
+  "caching",
+  "lru",
+  "disk-cache",
+  "in-memory-cache",
+  "async",
+  "aiohttp",
+  "python-3.10+"
+]
+classifiers = [
+    # Intended audience
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "Intended Audience :: System Administrators",
+
+    # Topics
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Software Development :: Utilities",
+    "Topic :: System :: Distributed Computing",
+
+    # License
+    "License :: OSI Approved :: MIT License",
+
+    # Supported Python versions
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.6",
+    "Programming Language :: Python :: 3.7",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11"
+]
