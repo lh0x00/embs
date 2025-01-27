@@ -19,7 +19,7 @@ jobs:
         run: >-
           python3 -m pip install build --user
       - name: 🛠️ Build Source and Binary Distributions
-        run: python3 -m build
+        run: poetry build
       - name: 📤 Upload Distribution Artifacts
         uses: actions/upload-artifact@v4
         with:
