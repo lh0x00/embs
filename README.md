@@ -39,7 +39,7 @@ For Poetry users:
 
 ```toml
 [tool.poetry.dependencies]
-embs = "^0.1.0"
+embs = "^0.1.7"
 ```
 
 ## 📖 Quick Start Guide
