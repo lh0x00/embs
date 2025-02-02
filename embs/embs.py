@@ -1,3 +1,5 @@
+# filename: embs.py
+
 """
 embs.py
 
@@ -9,7 +11,7 @@ Key features:
 - Document conversion via Docsifer (files and URLs)
 - Powerful document splitting (e.g., Markdown-based)
 - Embedding generation using a lightweight embeddings API
-- Ranking and optional embedding inclusion in results
+- Ranking and optional embedding inclusion in results (using local reranking)
 - In-memory and disk caching
 - DuckDuckGo-powered web search integration
 
@@ -23,6 +25,7 @@ import hashlib
 import logging
 import asyncio
 import aiohttp
+import numpy as np  # For local ranking computations
 
 from aiohttp import FormData
 from collections import OrderedDict
@@ -547,7 +550,9 @@ class Embs:
         model: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """
-        Asynchronously ranks candidate texts by relevance to the given query.
+        Asynchronously ranks candidate texts by relevance to the given query using embeddings.
+        It generates embeddings for the query and candidates via the /embeddings endpoint,
+        computes cosine similarity, and applies softmax to obtain probabilities.
         
         Args:
             query: The query string.
@@ -567,34 +572,53 @@ class Embs:
             if cached_data is not None:
                 return cached_data
 
-        endpoint = f"{self.embeddings_base_url}{self.rank_endpoint}"
-        payload = {
-            "model": model,
-            "queries": query,
-            "candidates": candidates
+        # Generate embeddings for the query.
+        query_embed_response = await self.embed_async(query, model=model)
+        query_embeds = query_embed_response.get("data")
+        if not query_embeds:
+            raise ValueError("Failed to generate embeddings for the query.")
+        # Ensure query_embeds is a 2D numpy array.
+        if isinstance(query_embeds[0], (float, int)):
+            query_embeds = np.array([query_embeds])
+        else:
+            query_embeds = np.array(query_embeds)
+        
+        # Generate embeddings for candidates.
+        candidate_embed_response = await self.embed_async(candidates, model=model)
+        candidate_embeds = candidate_embed_response.get("data")
+        if candidate_embeds is None or not candidate_embeds:
+            raise ValueError("Failed to generate embeddings for candidates.")
+        candidate_embeds = np.array(candidate_embeds)
+        
+        # Compute cosine similarity between query and candidate embeddings.
+        sim_matrix = self.cosine_similarity(query_embeds, candidate_embeds)
+        
+        # Scale similarities with a logit scale (defaulting to 1.0).
+        logit_scale = 1.0
+        scaled = sim_matrix * logit_scale
+        probs = self.softmax(scaled)
+        
+        # Estimate token usage.
+        query_tokens = self.estimate_tokens(query)
+        candidate_tokens = sum(self.estimate_tokens(text) for text in candidates)
+        total_tokens = query_tokens + candidate_tokens
+        usage = {
+            "prompt_tokens": total_tokens,
+            "total_tokens": total_tokens,
         }
-
-        async with aiohttp.ClientSession() as session:
-            async with session.post(endpoint, json=payload) as resp:
-                resp.raise_for_status()
-                data = await resp.json()
-                probabilities = data.get("probabilities", [[]])
-                cos_sims = data.get("cosine_similarities", [[]])
-
-                if not probabilities or not probabilities[0]:
-                    results = []
-                else:
-                    results = []
-                    for i, text_val in enumerate(candidates):
-                        p = probabilities[0][i] if i < len(probabilities[0]) else 0.0
-                        c = cos_sims[0][i] if i < len(cos_sims[0]) else 0.0
-                        results.append({
-                            "text": text_val,
-                            "probability": p,
-                            "cosine_similarity": c
-                        })
-                    results.sort(key=lambda x: x["probability"], reverse=True)
-
+        
+        # Prepare ranking results.
+        results = []
+        # Assuming a single query so sim_matrix and probs have shape (1, N).
+        for i, text_val in enumerate(candidates):
+            results.append({
+                "text": text_val,
+                "probability": probs[0][i],
+                "cosine_similarity": sim_matrix[0][i],
+            })
+        
+        results.sort(key=lambda x: x["probability"], reverse=True)
+        
         if self.cache_enabled and cache_key:
             self._save_to_cache(cache_key, results)
         return results
@@ -820,6 +844,44 @@ class Embs:
                 splitter=splitter
             )
         )
+
+    @staticmethod
+    def cosine_similarity(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        """
+        Computes the pairwise cosine similarity between all rows of a and b.
+        a: (N, D)
+        b: (M, D)
+        Returns: (N, M) matrix of cosine similarities.
+        """
+        a_norm = a / (np.linalg.norm(a, axis=1, keepdims=True) + 1e-9)
+        b_norm = b / (np.linalg.norm(b, axis=1, keepdims=True) + 1e-9)
+        return np.dot(a_norm, b_norm.T)
+
+    @staticmethod
+    def softmax(scores: np.ndarray) -> np.ndarray:
+        """
+        Applies the standard softmax function along the last dimension.
+        """
+        exps = np.exp(scores - np.max(scores, axis=-1, keepdims=True))
+        return exps / np.sum(exps, axis=-1, keepdims=True)
+
+    @staticmethod
+    def estimate_tokens(input_data: Union[str, List[str]]) -> int:
+        """
+        Estimates token count for the input text(s) by counting whitespace-separated tokens.
+        
+        Args:
+            input_data: A string or a list of strings.
+        
+        Returns:
+            Estimated token count as an integer.
+        """
+        if isinstance(input_data, str):
+            return len(input_data.split())
+        elif isinstance(input_data, list):
+            return sum(len(text.split()) for text in input_data)
+        else:
+            return 0
 
 # =============================================================================
 # Example usage:
