@@ -1,3 +1,5 @@
+# filename: embs.py
+
 """
 embs.py
 
@@ -489,7 +491,7 @@ class Embs:
         urls: Optional[List[str]] = None,
         openai_config: Optional[Dict[str, Any]] = None,
         settings: Optional[Dict[str, Any]] = None,
-        concurrency: int = 1,
+        concurrency: int = 2,
         options: Optional[Dict[str, Any]] = None,
         splitter: Optional[Callable[[List[Dict[str, str]]], List[Dict[str, str]]]] = None,
     ) -> List[Dict[str, str]]:
@@ -500,7 +502,7 @@ class Embs:
         Args:
             files: List of file paths or file-like objects.
             urls: List of URLs.
-            openai_config: Optional OpenAI configuration.
+            openai_config: Optional Docsifer (forward OpenAI) configuration.
             settings: Additional Docsifer settings.
             concurrency: Maximum concurrency for retrieval.
             options: Additional options (e.g., {"silent": True}).
@@ -665,13 +667,19 @@ class Embs:
         """
         if model is None:
             model = self.default_model
+            
+        if len(candidates) == 0:
+            return []
 
         # Generate embeddings for the query.
         query_embed_response = await self.embed_async(query, model=model)
         query_embeds = query_embed_response.get("data")
         if not query_embeds:
             raise ValueError("Failed to generate embeddings for the query.")
-        if isinstance(query_embeds[0], (float, int)):
+        # If each embedding is a dict, extract the numeric vector.
+        if isinstance(query_embeds[0], dict):
+            query_embeds = np.array([x["embedding"] for x in query_embeds])
+        elif isinstance(query_embeds[0], (float, int)):
             query_embeds = np.array([query_embeds])
         else:
             query_embeds = np.array(query_embeds)
@@ -681,7 +689,10 @@ class Embs:
         candidate_embeds = candidate_embed_response.get("data")
         if candidate_embeds is None or not candidate_embeds:
             raise ValueError("Failed to generate embeddings for candidates.")
-        candidate_embeds = np.array(candidate_embeds)
+        if isinstance(candidate_embeds[0], dict):
+            candidate_embeds = np.array([x["embedding"] for x in candidate_embeds])
+        else:
+            candidate_embeds = np.array(candidate_embeds)
         
         # Compute cosine similarity.
         sim_matrix = self.cosine_similarity(query_embeds, candidate_embeds)
@@ -718,7 +729,7 @@ class Embs:
         urls: Optional[List[str]] = None,
         openai_config: Optional[Dict[str, Any]] = None,
         settings: Optional[Dict[str, Any]] = None,
-        concurrency: int = 1,
+        concurrency: int = 2,
         options: Optional[Dict[str, Any]] = None,
         model: Optional[str] = None,
         splitter: Optional[Callable[[List[Dict[str, str]]], List[Dict[str, str]]]] = None,
@@ -732,7 +743,7 @@ class Embs:
             query: The query to rank against.
             files: List of file paths or file-like objects.
             urls: List of URLs to convert.
-            openai_config: Optional Docsifer configuration.
+            openai_config: Optional Docsifer (forward OpenAI) configuration.
             settings: Additional Docsifer settings.
             concurrency: Maximum concurrency for retrieval.
             options: Additional options (e.g., {"embeddings": True}).
@@ -802,7 +813,7 @@ class Embs:
         urls: Optional[List[str]] = None,
         openai_config: Optional[Dict[str, Any]] = None,
         settings: Optional[Dict[str, Any]] = None,
-        concurrency: int = 1,
+        concurrency: int = 2,
         options: Optional[Dict[str, Any]] = None,
         model: Optional[str] = None,
         splitter: Optional[Callable[[List[Dict[str, str]]], List[Dict[str, str]]]] = None
@@ -867,7 +878,7 @@ class Embs:
         blocklist: Optional[List[str]] = None,
         openai_config: Optional[Dict[str, Any]] = None,
         settings: Optional[Dict[str, Any]] = None,
-        concurrency: int = 1,
+        concurrency: int = 2,
         options: Optional[Dict[str, Any]] = None,
         model: Optional[str] = None,
         splitter: Optional[Callable[[List[Dict[str, str]]], List[Dict[str, str]]]] = None,
@@ -880,7 +891,7 @@ class Embs:
             query: The search keyword.
             limit: Maximum number of DuckDuckGo results.
             blocklist: Optional list of domain substrings to filter out.
-            openai_config: Optional Docsifer configuration.
+            openai_config: Optional Docsifer (forward OpenAI) configuration.
             settings: Additional Docsifer settings.
             concurrency: Maximum concurrency for retrieval.
             options: Additional options (e.g., {"embeddings": True}).
@@ -910,7 +921,7 @@ class Embs:
         blocklist: Optional[List[str]] = None,
         openai_config: Optional[Dict[str, Any]] = None,
         settings: Optional[Dict[str, Any]] = None,
-        concurrency: int = 1,
+        concurrency: int = 2,
         options: Optional[Dict[str, Any]] = None,
         model: Optional[str] = None,
         splitter: Optional[Callable[[List[Dict[str, str]]], List[Dict[str, str]]]] = None,
@@ -1012,6 +1023,7 @@ class Embs:
 #     query="Latest advances in AI",
 #     limit=5,
 #     blocklist=["youtube.com"],
+#     splitter=md_splitter,
 #     options={"embeddings": True}
 # )
 # for item in results:

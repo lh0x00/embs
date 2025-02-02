@@ -9,6 +9,75 @@ from unittest.mock import patch, mock_open
 from embs.embs import Embs
 
 
+###############################
+# Mock classes for embedding  #
+###############################
+
+class MockContextManagerEmbedding:
+    """
+    A mock context manager for embedding API calls.
+    Returns different responses depending on whether the call is for a query or candidate embedding.
+    """
+    def __init__(self, query: bool):
+        self.query = query
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        pass
+
+    def raise_for_status(self):
+        pass
+
+    async def json(self):
+        if self.query:
+            # For query embedding: return a vector [1, 0]
+            return {
+                "object": "list",
+                "data": [[1, 0]],
+                "model": "test-model",
+                "usage": {"prompt_tokens": 2, "total_tokens": 2}
+            }
+        else:
+            # For candidate embeddings: return two vectors: first candidate [0, 1], second candidate [1, 0]
+            return {
+                "object": "list",
+                "data": [[0, 1], [1, 0]],
+                "model": "test-model",
+                "usage": {"prompt_tokens": 4, "total_tokens": 4}
+            }
+
+
+###############################
+# Mock class for Docsifer     #
+###############################
+
+class MockContextManagerDoc:
+    """
+    A mock context manager for Docsifer conversion calls.
+    Returns pre-defined document conversion responses.
+    """
+    def __init__(self, data):
+        self._data = data
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        pass
+
+    def raise_for_status(self):
+        pass
+
+    async def json(self):
+        return self._data
+
+
+###############################
+# Test functions start here   #
+###############################
+
 @pytest.mark.asyncio
 async def test_retrieve_documents_async_no_input():
     """
@@ -56,23 +125,7 @@ async def test_embed_async_in_memory_cache():
     Mocks network calls to avoid real requests.
     """
     def mock_post(*args, **kwargs):
-        class MockContextManager:
-            def __init__(self):
-                self._data = {
-                    "object": "list",
-                    "data": [{"object": "embedding", "index": 0, "embedding": [0.25, 0.75]}],
-                    "model": "test-model",
-                    "usage": {"prompt_tokens": 2, "total_tokens": 2}
-                }
-            async def __aenter__(self):
-                return self
-            async def __aexit__(self, exc_type, exc_val, exc_tb):
-                pass
-            def raise_for_status(self):
-                pass
-            async def json(self):
-                return self._data
-        return MockContextManager()
+        return MockContextManagerEmbedding(query=True)
 
     cache_conf = {
         "enabled": True,
@@ -88,6 +141,7 @@ async def test_embed_async_in_memory_cache():
         resp1 = await embs.embed_async(text_data, model="test-model")
         resp2 = await embs.embed_async(text_data, model="test-model")
         assert resp1 == resp2, "Expected the second embedding call to use cached data."
+        # Since optimized=True (default) and input is a single text, one network call should be made.
         assert mock_method.call_count == 1, "Second call should be served from cache."
 
 
@@ -141,168 +195,102 @@ async def test_embed_async_lru_eviction():
 @pytest.mark.asyncio
 async def test_rank_async_mock():
     """
-    Mocks the rank API call to confirm that rank_async sorts candidates
-    by descending probability.
+    Mocks the embedding API calls used by rank_async to confirm that rank_async
+    sorts candidates by descending probability.
+    To ensure candidate calls return batched embeddings (with 2 items), we patch embed_async to force optimized=False.
     """
     def mock_post(*args, **kwargs):
-        class MockContextManager:
-            def __init__(self):
-                self._data = {
-                    "probabilities": [[0.2, 0.8]],
-                    "cosine_similarities": [[0.1, 0.9]]
-                }
-            async def __aenter__(self):
-                return self
-            async def __aexit__(self, exc_type, exc_val, exc_tb):
-                pass
-            def raise_for_status(self):
-                pass
-            async def json(self):
-                return self._data
-        return MockContextManager()
+        payload = kwargs.get("json", {})
+        if "input" in payload:
+            inp = payload["input"]
+            if isinstance(inp, list):
+                # For query call, batch size is 1.
+                if len(inp) == 1:
+                    return MockContextManagerEmbedding(query=True)
+                # For candidate call, batch size is 2.
+                elif len(inp) == 2:
+                    return MockContextManagerEmbedding(query=False)
+        return MockContextManagerEmbedding(query=False)
 
     embs = Embs()
+    # Force embed_async to always use optimized=False
+    orig_embed_async = embs.embed_async
+    embs.embed_async = lambda texts, model=None, optimized=True: orig_embed_async(texts, model=model, optimized=False)
+
     with patch("aiohttp.ClientSession.post", side_effect=mock_post):
         candidates = ["candidate1", "candidate2"]
-        ranked = await embs.rank_async("test query", candidates)
+        ranked = await embs.rank_async("test query", candidates, model="test-model")
+        # Expected: candidate2 should have higher cosine similarity and probability.
         assert len(ranked) == 2
-        # "candidate2" (probability=0.8) should come first.
-        assert ranked[0]["text"] == "candidate2"
-        assert ranked[0]["probability"] == 0.8
+        assert ranked[0]["text"] == "candidate2", "Expected candidate2 to be ranked first."
+        assert 0.72 < ranked[0]["probability"] < 0.74, "Expected probability for candidate2 to be around 0.73."
+
+    # Restore original embed_async
+    embs.embed_async = orig_embed_async
 
 
 @pytest.mark.asyncio
 async def test_rank_async_empty_candidates():
     """
     Ensures that when an empty list of candidates is provided,
-    rank_async returns an empty list.
+    rank_async returns an empty list without making any network calls.
     """
-    def mock_post(*args, **kwargs):
-        class MockContext:
-            def __init__(self):
-                self._data = {"probabilities": [[]], "cosine_similarities": [[]]}
-            async def __aenter__(self):
-                return self
-            async def __aexit__(self, exc_type, exc_val, exc_tb):
-                pass
-            def raise_for_status(self):
-                pass
-            async def json(self):
-                return self._data
-        return MockContext()
-
     embs = Embs()
-    with patch("aiohttp.ClientSession.post", side_effect=mock_post) as post_mock:
-        ranked = await embs.rank_async("test query", [])
-        # Even with empty candidates, the endpoint is called.
-        assert post_mock.call_count == 1, "Expected a call even with empty candidates."
-        assert ranked == [], "Empty candidates should yield an empty ranking."
-
-
-# @pytest.mark.asyncio
-# async def test_query_documents_async_integration():
-#     """
-#     Tests query_documents_async by simulating Docsifer conversion (using files)
-#     and ranking. Verifies that the returned documents are correctly ranked.
-#     """
-#     # Simulated responses from Docsifer.
-#     doc_resp_1 = {"filename": "doc1.pdf", "markdown": "Doc1 content"}
-#     doc_resp_2 = {"filename": "doc2.pdf", "markdown": "Doc2 content"}
-#     # Simulated ranking: doc2 has higher probability.
-#     rank_resp = {
-#         "probabilities": [[0.1, 0.9]],
-#         "cosine_similarities": [[0.2, 0.8]]
-#     }
-
-#     def mock_post(*args, **kwargs):
-#         class MockContextManager:
-#             def __init__(self, data):
-#                 self._data = data
-#             async def __aenter__(self):
-#                 return self
-#             async def __aexit__(self, exc_type, exc_val, exc_tb):
-#                 pass
-#             def raise_for_status(self):
-#                 pass
-#             async def json(self):
-#                 return self._data
-
-#         payload = kwargs.get("json", {})
-#         if "candidates" in payload:
-#             return MockContextManager(rank_resp)
-#         # For Docsifer conversion calls, alternate responses.
-#         if not hasattr(mock_post, "call_count"):
-#             mock_post.call_count = 0
-#         if mock_post.call_count == 0:
-#             mock_post.call_count += 1
-#             return MockContextManager(doc_resp_1)
-#         return MockContextManager(doc_resp_2)
-
-#     embs = Embs()
-#     with patch("aiohttp.ClientSession.post", side_effect=mock_post):
-#         results = await embs.query_documents_async(
-#             query="sample query",
-#             files=["/path/file1.pdf", "/path/file2.pdf"]
-#         )
-#         assert len(results) == 2, "Expected 2 ranked documents."
-#         # With higher probability, doc2 should be ranked first.
-#         assert results[0]["filename"] == "doc2.pdf"
-#         assert results[0]["probability"] == 0.9
+    # With empty candidates, rank_async should return [] immediately.
+    ranked = await embs.rank_async("test query", [])
+    assert ranked == [], "Empty candidates should yield an empty ranking."
 
 
 @pytest.mark.asyncio
 async def test_search_documents_async_duckduckgo_integration():
     """
     Tests search_documents_async (DuckDuckGo-based search) by mocking
-    _duckduckgo_search to return fixed URLs, and then simulating Docsifer conversion and ranking.
+    _duckduckgo_search to return fixed URLs, and then simulating Docsifer conversion and embedding calls.
+    We force embed_async to use optimized=False so that candidate embeddings are batched.
     """
-    # Fake URLs returned by DuckDuckGo.
     fake_urls = ["http://example.com/doc1", "http://example.com/doc2"]
-    # Simulated Docsifer conversion responses.
     doc_resp_1 = {"filename": "doc1.html", "markdown": "Content from doc1"}
     doc_resp_2 = {"filename": "doc2.html", "markdown": "Content from doc2"}
-    # Simulated ranking: doc2 is ranked higher.
-    rank_resp = {
-        "probabilities": [[0.3, 0.7]],
-        "cosine_similarities": [[0.4, 0.6]]
-    }
 
     def mock_post(*args, **kwargs):
-        class MockContextManager:
-            def __init__(self, data):
-                self._data = data
-            async def __aenter__(self):
-                return self
-            async def __aexit__(self, exc_type, exc_val, exc_tb):
-                pass
-            def raise_for_status(self):
-                pass
-            async def json(self):
-                return self._data
-
-        payload = kwargs.get("json", {})
-        if "candidates" in payload:
-            return MockContextManager(rank_resp)
+        # If it's an embedding call (JSON payload with "input"), return embeddings accordingly.
+        if "json" in kwargs:
+            payload = kwargs["json"]
+            if "input" in payload:
+                inp = payload["input"]
+                if isinstance(inp, list):
+                    if len(inp) == 1:
+                        return MockContextManagerEmbedding(query=True)
+                    elif len(inp) == 2:
+                        return MockContextManagerEmbedding(query=False)
+        # Otherwise, assume it's a Docsifer conversion call.
         if not hasattr(mock_post, "call_count"):
             mock_post.call_count = 0
         if mock_post.call_count == 0:
             mock_post.call_count += 1
-            return MockContextManager(doc_resp_1)
-        return MockContextManager(doc_resp_2)
+            return MockContextManagerDoc(doc_resp_1)
+        else:
+            return MockContextManagerDoc(doc_resp_2)
 
     embs = Embs()
-    # Patch _duckduckgo_search to return our fake URLs.
+    # Force embed_async to use optimized=False for candidate embeddings.
+    orig_embed_async = embs.embed_async
+    embs.embed_async = lambda texts, model=None, optimized=True: orig_embed_async(texts, model=model, optimized=False)
+
     with patch.object(embs, "_duckduckgo_search", return_value=fake_urls):
         with patch("aiohttp.ClientSession.post", side_effect=mock_post):
             results = await embs.search_documents_async(
                 query="test duckduckgo",
                 limit=5,
-                blocklist=["blockeddomain.com"]
+                blocklist=["blockeddomain.com"],
+                model="test-model"
             )
             assert len(results) == 2, "Expected 2 ranked documents from DuckDuckGo integration."
-            # The doc with higher ranking should appear first.
-            assert results[0]["filename"] == "doc2.html"
-            assert results[0]["probability"] == 0.7
+            # With our mocked embeddings, doc2 (from second conversion) should be ranked higher.
+            assert results[0]["filename"] == "doc2.html", "Expected doc2.html to be ranked first."
+            assert results[0]["probability"] > results[1]["probability"]
+
+    embs.embed_async = orig_embed_async
 
 
 def test_sync_wrapper_search_documents():
@@ -351,7 +339,6 @@ async def test_duckduckgo_search():
         {"href": "http://blockeddomain.com/3", "title": "Title 3", "body": "Snippet 3"},
     ]
 
-    # Create a fake DDGS context manager.
     class FakeDDGS:
         def __init__(self):
             pass
@@ -360,15 +347,11 @@ async def test_duckduckgo_search():
         def __exit__(self, exc_type, exc_val, exc_tb):
             pass
         def text(self, query, safesearch, max_results, backend, region):
-            # Return an iterator (or generator) over our fake results.
             return fake_results
 
     embs = Embs()
-    # Patch the DDGS imported in the _duckduckgo_search method.
     with patch("embs.embs.DDGS", return_value=FakeDDGS()):
-        # Call _duckduckgo_search with a blocklist to filter out blockeddomain.com.
         urls = await embs._duckduckgo_search(query="test", limit=5, blocklist=["blockeddomain.com"])
-        # We expect only the URLs not matching the blocklist.
         assert urls == ["http://example.com/1", "http://example.com/2"], "Filtered URLs do not match expected."
 
 
@@ -376,7 +359,7 @@ async def test_duckduckgo_search():
 async def test_disk_cache(tmp_path):
     """
     Verifies disk caching by storing and retrieving a mocked embedding.
-    Ensures a cache file (.json) is created in the temporary directory.
+    Ensures a cache file (.json) is created in the temporary directory and reused.
     """
     def mock_post(*args, **kwargs):
         class MockContextManager:
@@ -406,15 +389,18 @@ async def test_disk_cache(tmp_path):
     }
     embs = Embs(cache_config=cache_conf)
 
-    with patch("aiohttp.ClientSession.post", side_effect=mock_post) as mock_method:
-        text_data = ["hello", "world"]
-        first_resp = await embs.embed_async(text_data, model="disk-test-model")
-        second_resp = await embs.embed_async(text_data, model="disk-test-model")
-        # Second call should use the cache.
-        assert first_resp == second_resp
-        assert mock_method.call_count == 1
-        files_in_dir = os.listdir(tmp_path)
-        assert any(fname.endswith(".json") for fname in files_in_dir), "Expected a .json cache file on disk."
+    # Patch time.time to return a constant value for both calls.
+    with patch("time.time", return_value=100000):
+        with patch("aiohttp.ClientSession.post", side_effect=mock_post) as mock_method:
+            text_data = ["hello", "world"]
+            first_resp = await embs.embed_async(text_data, model="disk-test-model", optimized=False)
+            second_resp = await embs.embed_async(text_data, model="disk-test-model", optimized=False)
+            # Second call should use the disk cache.
+            assert first_resp == second_resp, "Expected cached response to match initial response."
+            # Only one network call should be made.
+            assert mock_method.call_count == 1, "Second call should be served from cache."
+            files_in_dir = os.listdir(tmp_path)
+            assert any(fname.endswith(".json") for fname in files_in_dir), "Expected a .json cache file on disk."
 
 
 @pytest.mark.asyncio
@@ -455,10 +441,10 @@ async def test_disk_cache_expiry(tmp_path):
          patch("time.time") as time_mock:
         t0 = 100000
         time_mock.return_value = t0
-        data1 = await embs.embed_async("Disk expiry text")
+        data1 = await embs.embed_async("Disk expiry text", model="disk-expiry-test")
         assert mock_method.call_count == 1
         time_mock.return_value = t0 + 301  # Exceed TTL
-        data2 = await embs.embed_async("Disk expiry text")
+        data2 = await embs.embed_async("Disk expiry text", model="disk-expiry-test")
         assert mock_method.call_count == 2, "Cache expired, so a new network call should be made."
         assert data1 == data2
 
