@@ -1,4 +1,20 @@
-# filename: embs.py
+"""
+embs.py
+
+A lightweight Python library that streamlines document ingestion,
+embedding, and ranking for RAG systems, chatbots, semantic search engines,
+and more.
+
+Key features:
+- Document conversion via Docsifer (files and URLs)
+- Powerful document splitting (e.g., Markdown-based)
+- Embedding generation using a lightweight embeddings API
+- Ranking and optional embedding inclusion in results
+- In-memory and disk caching
+- DuckDuckGo-powered web search integration
+
+Usage examples are provided in the README.
+"""
 
 import os
 import json
@@ -13,8 +29,10 @@ from collections import OrderedDict
 from typing import (
     List, Dict, Any, Optional, Union, Callable, Tuple
 )
+from duckduckgo_search import DDGS
 
 logger = logging.getLogger(__name__)
+
 
 def _split_markdown_text(
     text: str,
@@ -23,37 +41,33 @@ def _split_markdown_text(
     strip_headers: bool
 ) -> List[str]:
     """
-    Splits a single markdown string into multiple chunks based on specified headers.
-
+    Splits a markdown string into chunks based on specified header markers.
+    
     Args:
-        text: The full markdown text to split.
-        headers_to_split_on: A list of (header_prefix, header_name) pairs, e.g. [("#", "h1"), ("##", "h2")].
-        return_each_line: If True, every line becomes its own chunk (unless blank).
-        strip_headers: If True, header lines themselves are removed from the chunk content.
-
+        text: Full markdown text.
+        headers_to_split_on: A list of (header_prefix, header_name) pairs.
+        return_each_line: If True, each nonblank line is its own chunk.
+        strip_headers: If True, header lines are not included in the chunks.
+    
     Returns:
-        A list of chunk strings resulting from splitting the original markdown text.
+        List of chunk strings.
     """
-    # Sort by length (descending) so that longer header prefixes (e.g. "##" vs "#") match first
+    # Sort header markers descending by length so that longer markers match first.
     headers_to_split_on = sorted(headers_to_split_on, key=lambda x: len(x[0]), reverse=True)
 
-    # We'll track lines with metadata so we can group lines under the same header hierarchy
     lines_with_metadata: List[Dict[str, Any]] = []
     raw_lines = text.split("\n")
 
-    # Code block fence detection
     in_code_block = False
     opening_fence = ""
 
     current_content: List[str] = []
     current_metadata: Dict[str, str] = {}
 
-    # header_stack helps track nested header levels
     header_stack: List[Dict[str, Union[int, str]]] = []
     active_metadata: Dict[str, str] = {}
 
     def flush_current():
-        """Helper function to flush current_content into lines_with_metadata."""
         if current_content:
             lines_with_metadata.append({
                 "content": "\n".join(current_content),
@@ -62,15 +76,13 @@ def _split_markdown_text(
             current_content.clear()
 
     for line in raw_lines:
-        stripped_line = line.strip()
-        # Remove non-printable characters
-        stripped_line = "".join(ch for ch in stripped_line if ch.isprintable())
+        stripped_line = "".join(ch for ch in line.strip() if ch.isprintable())
 
-        # Check if we are entering or exiting a code block
+        # Detect code blocks.
         if not in_code_block:
-            if stripped_line.startswith("```") and stripped_line.count("```") == 1:
+            if stripped_line.startswith("</code></pre>") and stripped_line.count("<pre class=" 'overflow-x-auto"><code>') == 1:
                 in_code_block = True
-                opening_fence = "```"
+                opening_fence = "</code></pre>"
             elif stripped_line.startswith("~~~"):
                 in_code_block = True
                 opening_fence = "~~~"
@@ -78,71 +90,49 @@ def _split_markdown_text(
             if stripped_line.startswith(opening_fence):
                 in_code_block = False
                 opening_fence = ""
-
         if in_code_block:
             current_content.append(stripped_line)
             continue
 
         found_header = False
         for sep, name in headers_to_split_on:
-            # Check if the line starts with a known header prefix
-            if stripped_line.startswith(sep) and (
-                len(stripped_line) == len(sep) or stripped_line[len(sep)] == " "
-            ):
+            if stripped_line.startswith(sep) and (len(stripped_line) == len(sep) or stripped_line[len(sep)] == " "):
                 found_header = True
                 current_level = sep.count("#")
-
-                # Pop any headers at or deeper than the current level
                 while header_stack and header_stack[-1]["level"] >= current_level:
                     popped = header_stack.pop()
-                    if popped["name"] in active_metadata:
-                        active_metadata.pop(popped["name"], None)
-
-                # Push new header
+                    active_metadata.pop(popped["name"], None)
                 header_stack.append({
                     "level": current_level,
                     "name": name,
                     "data": stripped_line[len(sep):].strip()
                 })
                 active_metadata[name] = header_stack[-1]["data"]
-
-                # Flush any current lines
                 flush_current()
-
-                # If not stripping header lines, we include the header text itself
                 if not strip_headers:
                     current_content.append(stripped_line)
-
                 break
 
         if not found_header:
             if stripped_line:
                 current_content.append(stripped_line)
             else:
-                # Blank line => flush
                 flush_current()
-
         current_metadata = active_metadata.copy()
 
-    # Flush the remainder
     flush_current()
 
-    # If return_each_line = True, each line is a separate chunk
     if return_each_line:
-        final_chunks: List[str] = []
+        final_chunks = []
         for item in lines_with_metadata:
-            per_line = item["content"].split("\n")
-            for single_line in per_line:
+            for single_line in item["content"].split("\n"):
                 if single_line.strip():
                     final_chunks.append(single_line)
         return final_chunks
 
-    # Otherwise, we group lines that share the same metadata block
-    # lines_with_metadata is already one block per "metadata" break, so we just merge them if needed
-    final_chunks: List[str] = []
+    final_chunks = []
     temp_block = None
     temp_meta = None
-
     for item in lines_with_metadata:
         txt = item["content"]
         meta = item["metadata"]
@@ -153,21 +143,24 @@ def _split_markdown_text(
                 final_chunks.append(temp_block)
             temp_block = txt
             temp_meta = meta
-
     if temp_block is not None:
         final_chunks.append(temp_block)
-
     return final_chunks
+
 
 class Embs:
     """
-    Provides document retrieval from Docsifer, embeddings with the Lightweight Embeddings API,
-    and ranking of documents by query relevance. Caching can be configured in memory or on disk,
-    with both time-based TTL and optional LRU eviction for in-memory items.
-
-    You can optionally pass a `splitter` callable to the retrieve or search methods. If not None,
-    it must accept a list of docs (each doc is {"filename": str, "markdown": str})
-    and return a new list of docs with the same shape but possibly split further.
+    A one-stop toolkit for document ingestion, embedding, and ranking workflows.
+    
+    This library integrates:
+      - Docsifer for converting files/URLs to markdown,
+      - A lightweight embeddings API for generating text embeddings, and
+      - Ranking of documents/chunks based on query relevance.
+    
+    It supports optional in-memory or disk caching and flexible document splitting.
+    
+    You can also choose to have the final results include the raw embeddings by passing
+    options={"embeddings": True} to the query and search methods.
     """
 
     def __init__(
@@ -182,23 +175,15 @@ class Embs:
     ):
         """
         Initialize an Embs instance.
-
+        
         Args:
             docsifer_base_url: Base URL for Docsifer.
-            docsifer_endpoint: Endpoint path for converting documents with Docsifer.
-            embeddings_base_url: Base URL for the Lightweight Embeddings service.
+            docsifer_endpoint: Endpoint path for document conversion.
+            embeddings_base_url: Base URL for the embeddings service.
             embeddings_endpoint: Endpoint path for generating embeddings.
             rank_endpoint: Endpoint path for ranking texts.
-            default_model: Default model name to use for embeddings and ranking if unspecified.
-            cache_config: Dictionary controlling caching behavior. Example:
-                {
-                    "enabled": True,
-                    "type": "memory",  # or "disk"
-                    "prefix": "mycache",
-                    "dir": "my_cache_dir",   # used if type="disk"
-                    "max_mem_items": 128,
-                    "max_ttl_seconds": 259200
-                }
+            default_model: Default model name for embedding and ranking.
+            cache_config: Dictionary to configure caching (memory or disk).
         """
         if cache_config is None:
             cache_config = {}
@@ -221,7 +206,6 @@ class Embs:
             raise ValueError('cache_config["type"] must be either "memory" or "disk".')
 
         self._mem_cache: "OrderedDict[str, (float, Any)]" = OrderedDict()
-
         if self.cache_enabled and self.cache_type == "disk":
             if not self.cache_dir:
                 raise ValueError('If "type"=="disk", you must provide "dir" in cache_config.')
@@ -233,29 +217,17 @@ class Embs:
         config: Optional[Dict[str, Any]] = None
     ) -> List[Dict[str, str]]:
         """
-        Static splitter method for markdown documents. Each doc is a dict:
-            {"filename": <str>, "markdown": <str>}
-
-        If `config` is provided, it can contain the following keys:
-          - "headers_to_split_on": List of (str, str), e.g. [("#", "h1"), ("##", "h2")]
-          - "return_each_line": bool
-          - "strip_headers": bool
-
-        Example usage:
-            docs = Embs.markdown_splitter(some_docs, {
-                "headers_to_split_on": [("#", "h1"), ("##", "h2")],
-                "return_each_line": False,
-                "strip_headers": True
-            })
-
+        Splits Markdown documents into smaller chunks using header rules.
+        
         Args:
             docs: A list of documents, each with "filename" and "markdown".
-            config: A dictionary specifying how to split the markdown.
-
+            config: Configuration dict for splitting. Keys:
+                - headers_to_split_on: List of (str, str) pairs.
+                - return_each_line: bool.
+                - strip_headers: bool.
+        
         Returns:
-            A new list of documents, potentially with multiple chunks per original doc,
-            each chunk having its own "filename" (e.g., "original/0", "original/1", etc.)
-            and "markdown".
+            A list of documents with subdivided chunks.
         """
         if config is None:
             config = {}
@@ -275,7 +247,6 @@ class Embs:
                 strip_headers=strip_headers
             )
             if not chunks:
-                # if there's no content, keep it as is
                 output_docs.append(doc)
             else:
                 for idx, chunk_text in enumerate(chunks):
@@ -286,11 +257,12 @@ class Embs:
         return output_docs
 
     def _make_key(self, name: str, **kwargs) -> str:
-        """Builds a cache key by hashing the method name, optional prefix, and sorted kwargs."""
+        """
+        Build a cache key by hashing the method name, optional prefix, and sorted kwargs.
+        """
         safe_kwargs = {}
         for k, v in kwargs.items():
             if isinstance(v, list):
-                # Convert list to stable string representation; ignore file-like
                 safe_list = []
                 for item in v:
                     if isinstance(item, str):
@@ -310,17 +282,17 @@ class Embs:
         return hashlib.sha256(raw_str.encode("utf-8")).hexdigest()
 
     def _evict_memory_cache_if_needed(self) -> None:
-        """
-        Removes the least recently used item if the in-memory cache exceeds max_mem_items.
-        """
+        """Evicts the least recently used item if memory cache exceeds capacity."""
         while len(self._mem_cache) > self.max_mem_items:
             key, _ = self._mem_cache.popitem(last=False)
             logger.debug(f"Evicted LRU item from memory cache: {key}")
 
     def _check_expiry_in_memory(self, key: str) -> bool:
         """
-        Checks if an item in memory has expired based on max_ttl_seconds.
-        Returns True if removed, False otherwise.
+        Checks if an in-memory cache item has expired.
+        
+        Returns:
+            True if the item was expired and removed.
         """
         timestamp, _ = self._mem_cache[key]
         if (time.time() - timestamp) > self.max_ttl_seconds:
@@ -331,13 +303,7 @@ class Embs:
 
     def _load_from_cache(self, key: str) -> Any:
         """
-        Retrieves a cached item by key from memory or disk if caching is enabled.
-
-        Args:
-            key: The cache key.
-
-        Returns:
-            The cached data, or None if not found or expired.
+        Retrieve a cached item from memory or disk.
         """
         if not self.cache_enabled:
             return None
@@ -346,7 +312,6 @@ class Embs:
             if key in self._mem_cache:
                 if self._check_expiry_in_memory(key):
                     return None
-                # Mark as recently used
                 timestamp, data = self._mem_cache.pop(key)
                 self._mem_cache[key] = (timestamp, data)
                 return data
@@ -375,11 +340,7 @@ class Embs:
 
     def _save_to_cache(self, key: str, data: Any) -> None:
         """
-        Saves data to memory or disk cache if caching is enabled.
-
-        Args:
-            key: The cache key.
-            data: The data to store.
+        Save data to cache (memory or disk).
         """
         if not self.cache_enabled:
             return
@@ -414,18 +375,7 @@ class Embs:
         options: Optional[Dict[str, Any]],
     ) -> Optional[Dict[str, str]]:
         """
-        Uploads a single file to Docsifer asynchronously and returns {"filename": ..., "markdown": ...}.
-
-        Args:
-            file: File path (string) or file-like object.
-            session: Aiohttp ClientSession.
-            openai_config: Optional LLM-based config for Docsifer.
-            settings: Additional Docsifer settings.
-            semaphore: Limits concurrency.
-            options: Dict of additional options, e.g. {"silent": True} to log errors instead of raising.
-
-        Returns:
-            A dict of {"filename": <str>, "markdown": <str>} on success, or None if an error occurred (silent=True).
+        Uploads a file to Docsifer and returns its converted markdown.
         """
         silent = bool(options.get("silent", False)) if options else False
         docsifer_url = f"{self.docsifer_base_url}{self.docsifer_endpoint}"
@@ -467,18 +417,7 @@ class Embs:
         options: Optional[Dict[str, Any]],
     ) -> Optional[Dict[str, str]]:
         """
-        Uploads a single URL to Docsifer for HTML->Markdown conversion.
-
-        Args:
-            url: The URL to process.
-            session: Aiohttp ClientSession.
-            openai_config: Optional LLM-based config for Docsifer.
-            settings: Additional Docsifer settings.
-            semaphore: Limits concurrency.
-            options: Dict of additional options, e.g. {"silent": True}.
-
-        Returns:
-            A dict of {"filename": <str>, "markdown": <str>} on success, or None if an error occurred (silent=True).
+        Uploads a URL to Docsifer for HTML-to-Markdown conversion.
         """
         silent = bool(options.get("silent", False)) if options else False
         docsifer_url = f"{self.docsifer_base_url}{self.docsifer_endpoint}"
@@ -513,23 +452,8 @@ class Embs:
         splitter: Optional[Callable[[List[Dict[str, str]]], List[Dict[str, str]]]] = None,
     ) -> List[Dict[str, str]]:
         """
-        Asynchronously retrieves documents from Docsifer (via files and/or URLs), returning a list of:
-            [{"filename": <str>, "markdown": <str>} ...]
-
-        If splitter is provided, it will be applied to the final list of docs (e.g., to split large markdown text).
-
-        Args:
-            files: A list of file paths or file-like objects to upload.
-            urls: A list of URLs to be converted by Docsifer.
-            openai_config: Optional LLM-based extraction config for Docsifer.
-            settings: Additional Docsifer settings.
-            concurrency: Maximum number of concurrent tasks (file/URL conversions).
-            options: Dict of additional options, e.g. {"silent": True} to log instead of raise on errors.
-            splitter: A callable that takes a list of docs and returns a new list of docs (same shape).
-
-        Returns:
-            A list of docs, each doc is {"filename": <str>, "markdown": <str>}.
-            Potentially more than you started with if the splitter subdivides them.
+        Asynchronously retrieves documents from Docsifer (via files and/or URLs),
+        optionally applies a splitter, and returns a list of documents.
         """
         cache_key = None
         if self.cache_enabled:
@@ -541,7 +465,7 @@ class Embs:
                 settings=settings,
                 concurrency=concurrency,
                 options=options,
-                splitter=bool(splitter)  # store True/False
+                splitter=bool(splitter)
             )
             cached_data = self._load_from_cache(cache_key)
             if cached_data is not None:
@@ -572,7 +496,6 @@ class Embs:
                 elif r is not None:
                     logger.warning(f"Unexpected Docsifer response shape: {r}")
 
-        # Apply the splitter if provided
         if splitter is not None:
             all_docs = splitter(all_docs)
 
@@ -586,20 +509,14 @@ class Embs:
         model: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        Asynchronously generates embeddings for the given text(s) using the specified or default model.
-        Uses caching if enabled.
-
+        Asynchronously generates embeddings for the provided text(s).
+        
         Args:
-            text_or_texts: A single string or a list of strings to embed.
-            model: Model name. If None, uses self.default_model.
-
+            text_or_texts: A string or a list of strings.
+            model: Model name (defaults to self.default_model if not provided).
+        
         Returns:
-            A dict containing embeddings results, e.g.:
-            {
-              "model": ...,
-              "data": [...],
-              "usage": { ... }
-            }
+            A dictionary with keys like "data", "model", and "usage".
         """
         if model is None:
             model = self.default_model
@@ -630,29 +547,22 @@ class Embs:
         model: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """
-        Asynchronously ranks candidate strings by relevance to a single query using the rank endpoint.
-        Caches if enabled.
-
+        Asynchronously ranks candidate texts by relevance to the given query.
+        
         Args:
             query: The query string.
-            candidates: A list of candidate strings to rank.
-            model: Model name or None for default.
-
+            candidates: A list of candidate texts.
+            model: Model name (defaults to self.default_model if not provided).
+        
         Returns:
-            A list of dicts sorted by probability descending. For example:
-            [
-              {"text": <candidate_str>, "probability": <float>, "cosine_similarity": <float>},
-              ...
-            ]
+            A list of ranking dictionaries with keys "text", "probability", and "cosine_similarity".
         """
         if model is None:
             model = self.default_model
 
         cache_key = None
         if self.cache_enabled:
-            cache_key = self._make_key(
-                "rank_async", query=query, candidates=candidates, model=model
-            )
+            cache_key = self._make_key("rank_async", query=query, candidates=candidates, model=model)
             cached_data = self._load_from_cache(cache_key)
             if cached_data is not None:
                 return cached_data
@@ -689,7 +599,7 @@ class Embs:
             self._save_to_cache(cache_key, results)
         return results
 
-    async def search_documents_async(
+    async def query_documents_async(
         self,
         query: str,
         files: Optional[List[Any]] = None,
@@ -702,30 +612,24 @@ class Embs:
         splitter: Optional[Callable[[List[Dict[str, str]]], List[Dict[str, str]]]] = None,
     ) -> List[Dict[str, Any]]:
         """
-        Asynchronously retrieves documents from Docsifer, optionally applies a splitter,
-        then ranks them by the given query.
-
+        Asynchronously retrieves documents (via files/URLs), ranks them by relevance to the query,
+        and returns a list of documents with ranking scores. Optionally, if options contains
+        "embeddings": True, the function will also attach an embedding for each document.
+        
         Args:
-            query: The query to compare against.
-            files: A list of file paths or file-like objects.
-            urls: A list of URLs to be converted.
-            openai_config: Optional LLM-based config for Docsifer.
+            query: The query to rank against.
+            files: List of file paths or file-like objects.
+            urls: List of URLs to convert.
+            openai_config: Optional Docsifer configuration.
             settings: Additional Docsifer settings.
-            concurrency: Max concurrency for the retrieval process.
-            options: Dict of additional options, e.g. {"silent": True}.
-            model: Model name for ranking or None for default.
-            splitter: A callable to split the docs. If not None, it must
-                take a list of docs and return a new list of docs.
-
+            concurrency: Max concurrency for retrieval.
+            options: Dict of additional options. Use {"embeddings": True} to include embeddings.
+            model: Model name for ranking (defaults to self.default_model).
+            splitter: Optional callable to further split document content.
+        
         Returns:
-            A list of dicts, each dict containing:
-            {
-              "filename": <str>,
-              "markdown": <str>,
-              "probability": <float>,
-              "cosine_similarity": <float>
-            },
-            sorted by probability descending.
+            A list of documents with keys "filename", "markdown", "probability", "cosine_similarity",
+            and optionally "embeddings".
         """
         docs = await self.retrieve_documents_async(
             files=files,
@@ -742,7 +646,7 @@ class Embs:
         candidates = [doc["markdown"] for doc in docs]
         ranking = await self.rank_async(query, candidates, model=model)
 
-        # Map text to doc indices
+        # Map ranked text to document indices.
         text_to_indices: Dict[str, List[int]] = {}
         for i, d_obj in enumerate(docs):
             text_val = d_obj["markdown"]
@@ -769,89 +673,17 @@ class Embs:
                     "cosine_similarity": item["cosine_similarity"]
                 })
 
+        # If requested, attach embeddings to each result.
+        if options and options.get("embeddings", False):
+            texts = [item["markdown"] for item in results]
+            embed_response = await self.embed_async(texts, model=model)
+            embeddings_list = embed_response.get("data", [])
+            for idx, item in enumerate(results):
+                item["embeddings"] = embeddings_list[idx] if idx < len(embeddings_list) else None
+
         return results
 
-    def retrieve_documents(
-        self,
-        files: Optional[List[Any]] = None,
-        urls: Optional[List[str]] = None,
-        openai_config: Optional[Dict[str, Any]] = None,
-        settings: Optional[Dict[str, Any]] = None,
-        concurrency: int = 5,
-        options: Optional[Dict[str, Any]] = None,
-        splitter: Optional[Callable[[List[Dict[str, str]]], List[Dict[str, str]]]] = None
-    ) -> List[Dict[str, str]]:
-        """
-        Synchronous wrapper for retrieve_documents_async.
-        Retrieves documents from Docsifer, optionally applies a splitter, and returns them.
-
-        Args:
-            files: A list of file paths or file-like objects.
-            urls: A list of URLs to convert.
-            openai_config: Optional LLM-based config for Docsifer.
-            settings: Additional Docsifer settings.
-            concurrency: Max concurrency for the retrieval.
-            options: Dict of additional options, e.g. {"silent": True}.
-            splitter: A callable that receives the list of docs, returns a new list of docs.
-
-        Returns:
-            A list of dicts [{"filename": <str>, "markdown": <str>} ...].
-        """
-        return asyncio.run(
-            self.retrieve_documents_async(
-                files=files,
-                urls=urls,
-                openai_config=openai_config,
-                settings=settings,
-                concurrency=concurrency,
-                options=options,
-                splitter=splitter
-            )
-        )
-
-    def embed(
-        self,
-        text_or_texts: Union[str, List[str]],
-        model: Optional[str] = None
-    ) -> Dict[str, Any]:
-        """
-        Synchronous wrapper for embed_async.
-        Generates embeddings for text_or_texts using the specified or default model.
-
-        Args:
-            text_or_texts: A string or list of strings to embed.
-            model: Optional model name. Defaults to self.default_model if None.
-
-        Returns:
-            A dict with embedding results, e.g. {"data": [...], "model": "...", "usage": {...}}.
-        """
-        return asyncio.run(self.embed_async(text_or_texts, model=model))
-
-    def rank(
-        self,
-        query: str,
-        candidates: List[str],
-        model: Optional[str] = None
-    ) -> List[Dict[str, Any]]:
-        """
-        Synchronous wrapper for rank_async.
-        Ranks candidate strings by relevance to 'query'.
-
-        Args:
-            query: The query text.
-            candidates: A list of candidate strings to rank.
-            model: Optional model name. Defaults to self.default_model if None.
-
-        Returns:
-            A list of dicts sorted by probability descending:
-            [
-              {"text": <str>, "probability": <float>, "cosine_similarity": <float>},
-              ...
-            ]
-        """
-        return asyncio.run(self.rank_async(query, candidates, model=model))
-
-    def search_documents(
+    def query_documents(
         self,
         query: str,
         files: Optional[List[Any]] = None,
@@ -864,34 +696,10 @@ class Embs:
         splitter: Optional[Callable[[List[Dict[str, str]]], List[Dict[str, str]]]] = None
     ) -> List[Dict[str, Any]]:
         """
-        Synchronous wrapper for search_documents_async.
-        Retrieves documents, optionally applies a splitter, then ranks them by the query.
-
-        Args:
-            query: The query string.
-            files: A list of file paths or file-like objects.
-            urls: A list of URLs.
-            openai_config: Optional LLM-based config for Docsifer.
-            settings: Additional Docsifer settings.
-            concurrency: Max concurrency for the retrieval.
-            options: Dict of additional options, e.g. {"silent": True}.
-            model: Model name or None for default.
-            splitter: An optional callable that receives the doc list and returns a new list.
-
-        Returns:
-            A list of ranked documents:
-            [
-              {
-                "filename": <str>,
-                "markdown": <str>,
-                "probability": <float>,
-                "cosine_similarity": <float>
-              },
-              ...
-            ], sorted by probability descending.
+        Synchronous wrapper for query_documents_async.
         """
         return asyncio.run(
-            self.search_documents_async(
+            self.query_documents_async(
                 query=query,
                 files=files,
                 urls=urls,
@@ -904,39 +712,150 @@ class Embs:
             )
         )
 
+    async def _duckduckgo_search(
+        self,
+        query: str,
+        limit: int,
+        blocklist: Optional[List[str]] = None
+    ) -> List[str]:
+        """
+        Asynchronously performs a DuckDuckGo search for the given query and returns a list of URLs.
+        
+        Args:
+            query: The search query string.
+            limit: Maximum number of search results.
+            blocklist: Optional list of domain substrings to filter out.
+        
+        Returns:
+            List of URLs from DuckDuckGo.
+        """
+        def run_search():
+            with DDGS() as ddgs:
+                return list(ddgs.text(query, safesearch="moderate", max_results=limit, backend="auto", region="vn-vi"))
+        results = await asyncio.to_thread(run_search)
+        urls = []
+        for item in results:
+            url = item.get("href")
+            if url:
+                if blocklist:
+                    skip = False
+                    for pattern in blocklist:
+                        if pattern in url:
+                            skip = True
+                            break
+                    if skip:
+                        continue
+                urls.append(url)
+        return urls
 
-# from typing import List, Dict
+    async def search_documents_async(
+        self,
+        query: str,
+        limit: int = 10,
+        blocklist: Optional[List[str]] = None,
+        openai_config: Optional[Dict[str, Any]] = None,
+        settings: Optional[Dict[str, Any]] = None,
+        concurrency: int = 5,
+        options: Optional[Dict[str, Any]] = None,
+        model: Optional[str] = None,
+        splitter: Optional[Callable[[List[Dict[str, str]]], List[Dict[str, str]]]] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Asynchronously searches for documents using DuckDuckGo to obtain URLs based on a keyword,
+        then retrieves and ranks their content (using Docsifer and the ranking API). This function
+        returns results similar to query_documents_async.
+        
+        Args:
+            query: The search keyword (used for both DuckDuckGo and ranking).
+            limit: Maximum number of DuckDuckGo results.
+            blocklist: Optional list of domain substrings to filter out.
+            openai_config: Optional Docsifer configuration.
+            settings: Additional Docsifer settings.
+            concurrency: Max concurrency for retrieval.
+            options: Dict of additional options. Use {"embeddings": True} to include embeddings.
+            model: Model name for ranking (defaults to self.default_model).
+            splitter: Optional callable to split document content.
+        
+        Returns:
+            A list of ranked documents with keys "filename", "markdown", "probability",
+            "cosine_similarity", and optionally "embeddings".
+        """
+        urls = await self._duckduckgo_search(query, limit=limit, blocklist=blocklist)
+        return await self.query_documents_async(
+            query=query,
+            urls=urls,
+            openai_config=openai_config,
+            settings=settings,
+            concurrency=concurrency,
+            options=options,
+            model=model,
+            splitter=splitter
+        )
+
+    def search_documents(
+        self,
+        query: str,
+        limit: int = 10,
+        blocklist: Optional[List[str]] = None,
+        openai_config: Optional[Dict[str, Any]] = None,
+        settings: Optional[Dict[str, Any]] = None,
+        concurrency: int = 5,
+        options: Optional[Dict[str, Any]] = None,
+        model: Optional[str] = None,
+        splitter: Optional[Callable[[List[Dict[str, str]]], List[Dict[str, str]]]] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Synchronous wrapper for search_documents_async (DuckDuckGo-powered search).
+        """
+        return asyncio.run(
+            self.search_documents_async(
+                query=query,
+                limit=limit,
+                blocklist=blocklist,
+                openai_config=openai_config,
+                settings=settings,
+                concurrency=concurrency,
+                options=options,
+                model=model,
+                splitter=splitter
+            )
+        )
+
+# =============================================================================
+# Example usage:
+# -----------------------------------------------------------------------------
+# 1) Using the built-in markdown splitter:
+#
 # from functools import partial
-
-# # 1) Using the built-in markdown_splitter:
+#
 # split_config = {
 #     "headers_to_split_on": [("#", "h1"), ("##", "h2"), ("###", "h3")],
 #     "return_each_line": False,
 #     "strip_headers": True,
 # }
-# my_splitter = partial(Embs.markdown_splitter, config=split_config)
-
-# embs = Embs()
-
-# docs = embs.retrieve_documents(
-#     files=["some_markdown.md"],
-#     splitter=my_splitter  # this calls the static method with the config
+# md_splitter = partial(Embs.markdown_splitter, config=split_config)
+#
+# client = Embs()
+#
+# # Retrieve and rank documents (query_documents) with optional embeddings in the results:
+# docs = client.query_documents(
+#     query="Explain quantum computing",
+#     files=["/path/to/quantum_theory.pdf"],
+#     splitter=md_splitter,
+#     options={"embeddings": True}
 # )
 # for d in docs:
-#     print(d["filename"], " => length:", len(d["markdown"]))
-
-# # 2) Or define a custom splitter method:
-# def custom_line_splitter(docs: List[Dict[str, str]]) -> List[Dict[str, str]]:
-#     new_docs = []
-#     for doc in docs:
-#         lines = doc["markdown"].split("\n")
-#         for idx, line in enumerate(lines):
-#             if line.strip():
-#                 new_docs.append({
-#                     "filename": f"{doc['filename']}/{idx}",
-#                     "markdown": line
-#                 })
-#     return new_docs
-
-# split_docs = embs.retrieve_documents(files=["some_markdown.md"], splitter=custom_line_splitter)
-# print(split_docs)
+#     print(d["filename"], "=> score:", d["probability"], "Embeddings:", d.get("embeddings"))
+#
+# 2) Search documents using DuckDuckGo (search_documents):
+#
+# results = client.search_documents(
+#     query="Latest advances in AI",
+#     limit=5,
+#     blocklist=["youtube.com"],
+#     options={"embeddings": True}
+# )
+# for item in results:
+#     print(f"File: {item['filename']} | Score: {item['probability']:.4f}")
+#     print(f"Snippet: {item['markdown'][:80]}...\n")
+# =============================================================================
