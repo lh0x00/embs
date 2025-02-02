@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "embs"
-version = "0.1.4"
+version = "0.1.5"
 description = "Embs is a lightweight Python toolkit for document retrieval, embedding generation, and ranking—ideal for RAG-based AI, chatbots, and search systems with caching support."
 authors = ["Hieu Lam <lamhieu.vk@gmail.com>"]
 readme = "README.md"
