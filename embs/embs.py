@@ -1,5 +1,3 @@
-# filename: embs.py
-
 """
 embs.py
 
@@ -29,12 +27,12 @@ import numpy as np  # For local ranking computations
 
 from aiohttp import FormData
 from collections import OrderedDict
-from typing import (
-    List, Dict, Any, Optional, Union, Callable, Tuple
-)
+from typing import List, Dict, Any, Optional, Union, Callable, Tuple
+
 from duckduckgo_search import DDGS
 
 logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
 
 def _split_markdown_text(
@@ -162,8 +160,7 @@ class Embs:
     
     It supports optional in-memory or disk caching and flexible document splitting.
     
-    You can also choose to have the final results include the raw embeddings by passing
-    options={"embeddings": True} to the query and search methods.
+    Final results can optionally include raw embeddings by specifying options={"embeddings": True}.
     """
 
     def __init__(
@@ -262,6 +259,13 @@ class Embs:
     def _make_key(self, name: str, **kwargs) -> str:
         """
         Build a cache key by hashing the method name, optional prefix, and sorted kwargs.
+        
+        Args:
+            name: Name of the method.
+            **kwargs: Key/value pairs to include in the key.
+        
+        Returns:
+            A SHA256 hash string representing the cache key.
         """
         safe_kwargs = {}
         for k, v in kwargs.items():
@@ -294,8 +298,11 @@ class Embs:
         """
         Checks if an in-memory cache item has expired.
         
+        Args:
+            key: The cache key.
+        
         Returns:
-            True if the item was expired and removed.
+            True if the item was expired and removed, False otherwise.
         """
         timestamp, _ = self._mem_cache[key]
         if (time.time() - timestamp) > self.max_ttl_seconds:
@@ -307,6 +314,12 @@ class Embs:
     def _load_from_cache(self, key: str) -> Any:
         """
         Retrieve a cached item from memory or disk.
+        
+        Args:
+            key: The cache key.
+        
+        Returns:
+            The cached data if present and not expired, else None.
         """
         if not self.cache_enabled:
             return None
@@ -344,6 +357,10 @@ class Embs:
     def _save_to_cache(self, key: str, data: Any) -> None:
         """
         Save data to cache (memory or disk).
+        
+        Args:
+            key: The cache key.
+            data: The data to cache.
         """
         if not self.cache_enabled:
             return
@@ -379,6 +396,17 @@ class Embs:
     ) -> Optional[Dict[str, str]]:
         """
         Uploads a file to Docsifer and returns its converted markdown.
+        
+        Args:
+            file: A file path or file-like object.
+            session: The aiohttp session.
+            openai_config: Optional OpenAI configuration.
+            settings: Additional settings for Docsifer.
+            semaphore: Concurrency semaphore.
+            options: Additional options (e.g., {"silent": True}).
+        
+        Returns:
+            A dictionary with keys "filename" and "markdown", or None on error.
         """
         silent = bool(options.get("silent", False)) if options else False
         docsifer_url = f"{self.docsifer_base_url}{self.docsifer_endpoint}"
@@ -421,6 +449,17 @@ class Embs:
     ) -> Optional[Dict[str, str]]:
         """
         Uploads a URL to Docsifer for HTML-to-Markdown conversion.
+        
+        Args:
+            url: The URL to convert.
+            session: The aiohttp session.
+            openai_config: Optional OpenAI configuration.
+            settings: Additional settings for Docsifer.
+            semaphore: Concurrency semaphore.
+            options: Additional options.
+        
+        Returns:
+            A dictionary with keys "filename" and "markdown", or None on error.
         """
         silent = bool(options.get("silent", False)) if options else False
         docsifer_url = f"{self.docsifer_base_url}{self.docsifer_endpoint}"
@@ -450,13 +489,25 @@ class Embs:
         urls: Optional[List[str]] = None,
         openai_config: Optional[Dict[str, Any]] = None,
         settings: Optional[Dict[str, Any]] = None,
-        concurrency: int = 5,
+        concurrency: int = 1,
         options: Optional[Dict[str, Any]] = None,
         splitter: Optional[Callable[[List[Dict[str, str]]], List[Dict[str, str]]]] = None,
     ) -> List[Dict[str, str]]:
         """
         Asynchronously retrieves documents from Docsifer (via files and/or URLs),
         optionally applies a splitter, and returns a list of documents.
+        
+        Args:
+            files: List of file paths or file-like objects.
+            urls: List of URLs.
+            openai_config: Optional OpenAI configuration.
+            settings: Additional Docsifer settings.
+            concurrency: Maximum concurrency for retrieval.
+            options: Additional options (e.g., {"silent": True}).
+            splitter: Optional callable to further split document content.
+        
+        Returns:
+            A list of documents (each with "filename" and "markdown").
         """
         cache_key = None
         if self.cache_enabled:
@@ -506,33 +557,29 @@ class Embs:
             self._save_to_cache(cache_key, all_docs)
         return all_docs
 
-    async def embed_async(
-        self,
-        text_or_texts: Union[str, List[str]],
-        model: Optional[str] = None
-    ) -> Dict[str, Any]:
+    async def _embed_batch(self, texts: List[str], model: str) -> Dict[str, Any]:
         """
-        Asynchronously generates embeddings for the provided text(s).
+        Asynchronously generate embeddings for a batch of texts.
+        
+        This helper function checks the cache for the given batch. If not cached,
+        it calls the embeddings API and caches the result.
         
         Args:
-            text_or_texts: A string or a list of strings.
-            model: Model name (defaults to self.default_model if not provided).
+            texts: A list of text strings to embed.
+            model: The model name to use.
         
         Returns:
-            A dictionary with keys like "data", "model", and "usage".
+            A dictionary containing the embedding results (with keys "data" and "usage").
         """
-        if model is None:
-            model = self.default_model
-
         cache_key = None
         if self.cache_enabled:
-            cache_key = self._make_key("embed_async", text=text_or_texts, model=model)
+            cache_key = self._make_key("embed_async", text=texts, model=model)
             cached_data = self._load_from_cache(cache_key)
             if cached_data is not None:
                 return cached_data
 
         endpoint = f"{self.embeddings_base_url}{self.embeddings_endpoint}"
-        payload = {"model": model, "input": text_or_texts}
+        payload = {"model": model, "input": texts}
 
         async with aiohttp.ClientSession() as session:
             async with session.post(endpoint, json=payload) as resp:
@@ -542,6 +589,60 @@ class Embs:
         if self.cache_enabled and cache_key:
             self._save_to_cache(cache_key, data)
         return data
+
+    async def embed_async(
+        self,
+        text_or_texts: Union[str, List[str]],
+        model: Optional[str] = None,
+        optimized: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Asynchronously generates embeddings for the provided text(s).
+        
+        When `optimized` is True, the batch size is set to 1 (each text is processed
+        individually) to maximize cache hits and reduce load. When `optimized` is False,
+        texts are grouped in batches of up to 4 items per API call.
+        
+        Args:
+            text_or_texts: A string or a list of text strings.
+            model: The model name to use (defaults to self.default_model if not provided).
+            optimized: Flag to control per-item (True) versus batched (False) processing.
+        
+        Returns:
+            A dictionary with keys "data", "model", and "usage". "data" holds a list of embeddings,
+            and "usage" contains token count information.
+        """
+        if model is None:
+            model = self.default_model
+
+        # Normalize input to a list.
+        if isinstance(text_or_texts, str):
+            texts = [text_or_texts]
+        else:
+            texts = text_or_texts
+
+        # Set batch size based on optimization flag.
+        batch_size = 1 if optimized else 4
+        batches = [texts[i:i + batch_size] for i in range(0, len(texts), batch_size)]
+
+        combined_data = []
+        total_tokens = 0
+
+        # Process each batch asynchronously.
+        tasks = [self._embed_batch(batch, model) for batch in batches]
+        results = await asyncio.gather(*tasks)
+        for res in results:
+            if "data" in res:
+                combined_data.extend(res["data"])
+            if "usage" in res:
+                usage = res["usage"]
+                total_tokens += usage.get("total_tokens", 0)
+
+        return {
+            "data": combined_data,
+            "model": model,
+            "usage": {"total_tokens": total_tokens, "prompt_tokens": total_tokens}
+        }
 
     async def rank_async(
         self,
@@ -557,7 +658,7 @@ class Embs:
         Args:
             query: The query string.
             candidates: A list of candidate texts.
-            model: Model name (defaults to self.default_model if not provided).
+            model: The model name (defaults to self.default_model if not provided).
         
         Returns:
             A list of ranking dictionaries with keys "text", "probability", and "cosine_similarity".
@@ -565,19 +666,11 @@ class Embs:
         if model is None:
             model = self.default_model
 
-        cache_key = None
-        if self.cache_enabled:
-            cache_key = self._make_key("rank_async", query=query, candidates=candidates, model=model)
-            cached_data = self._load_from_cache(cache_key)
-            if cached_data is not None:
-                return cached_data
-
         # Generate embeddings for the query.
         query_embed_response = await self.embed_async(query, model=model)
         query_embeds = query_embed_response.get("data")
         if not query_embeds:
             raise ValueError("Failed to generate embeddings for the query.")
-        # Ensure query_embeds is a 2D numpy array.
         if isinstance(query_embeds[0], (float, int)):
             query_embeds = np.array([query_embeds])
         else:
@@ -590,10 +683,8 @@ class Embs:
             raise ValueError("Failed to generate embeddings for candidates.")
         candidate_embeds = np.array(candidate_embeds)
         
-        # Compute cosine similarity between query and candidate embeddings.
+        # Compute cosine similarity.
         sim_matrix = self.cosine_similarity(query_embeds, candidate_embeds)
-        
-        # Scale similarities with a logit scale (defaulting to 1.0).
         logit_scale = 1.0
         scaled = sim_matrix * logit_scale
         probs = self.softmax(scaled)
@@ -607,9 +698,8 @@ class Embs:
             "total_tokens": total_tokens,
         }
         
-        # Prepare ranking results.
+        # Prepare ranking results (assuming single query).
         results = []
-        # Assuming a single query so sim_matrix and probs have shape (1, N).
         for i, text_val in enumerate(candidates):
             results.append({
                 "text": text_val,
@@ -619,8 +709,6 @@ class Embs:
         
         results.sort(key=lambda x: x["probability"], reverse=True)
         
-        if self.cache_enabled and cache_key:
-            self._save_to_cache(cache_key, results)
         return results
 
     async def query_documents_async(
@@ -630,15 +718,15 @@ class Embs:
         urls: Optional[List[str]] = None,
         openai_config: Optional[Dict[str, Any]] = None,
         settings: Optional[Dict[str, Any]] = None,
-        concurrency: int = 5,
+        concurrency: int = 1,
         options: Optional[Dict[str, Any]] = None,
         model: Optional[str] = None,
         splitter: Optional[Callable[[List[Dict[str, str]]], List[Dict[str, str]]]] = None,
     ) -> List[Dict[str, Any]]:
         """
-        Asynchronously retrieves documents (via files/URLs), ranks them by relevance to the query,
-        and returns a list of documents with ranking scores. Optionally, if options contains
-        "embeddings": True, the function will also attach an embedding for each document.
+        Asynchronously retrieves documents from Docsifer (via files/URLs), ranks them by relevance
+        to the query, and returns a list of documents with ranking scores. Optionally, if options contains
+        {"embeddings": True}, the function attaches an embedding for each document.
         
         Args:
             query: The query to rank against.
@@ -646,8 +734,8 @@ class Embs:
             urls: List of URLs to convert.
             openai_config: Optional Docsifer configuration.
             settings: Additional Docsifer settings.
-            concurrency: Max concurrency for retrieval.
-            options: Dict of additional options. Use {"embeddings": True} to include embeddings.
+            concurrency: Maximum concurrency for retrieval.
+            options: Additional options (e.g., {"embeddings": True}).
             model: Model name for ranking (defaults to self.default_model).
             splitter: Optional callable to further split document content.
         
@@ -697,7 +785,7 @@ class Embs:
                     "cosine_similarity": item["cosine_similarity"]
                 })
 
-        # If requested, attach embeddings to each result.
+        # Attach embeddings if requested.
         if options and options.get("embeddings", False):
             texts = [item["markdown"] for item in results]
             embed_response = await self.embed_async(texts, model=model)
@@ -714,7 +802,7 @@ class Embs:
         urls: Optional[List[str]] = None,
         openai_config: Optional[Dict[str, Any]] = None,
         settings: Optional[Dict[str, Any]] = None,
-        concurrency: int = 5,
+        concurrency: int = 1,
         options: Optional[Dict[str, Any]] = None,
         model: Optional[str] = None,
         splitter: Optional[Callable[[List[Dict[str, str]]], List[Dict[str, str]]]] = None
@@ -746,12 +834,12 @@ class Embs:
         Asynchronously performs a DuckDuckGo search for the given query and returns a list of URLs.
         
         Args:
-            query: The search query string.
+            query: The search query.
             limit: Maximum number of search results.
             blocklist: Optional list of domain substrings to filter out.
         
         Returns:
-            List of URLs from DuckDuckGo.
+            A list of URLs.
         """
         def run_search():
             with DDGS() as ddgs:
@@ -775,30 +863,29 @@ class Embs:
     async def search_documents_async(
         self,
         query: str,
-        limit: int = 10,
+        limit: int = 5,
         blocklist: Optional[List[str]] = None,
         openai_config: Optional[Dict[str, Any]] = None,
         settings: Optional[Dict[str, Any]] = None,
-        concurrency: int = 5,
+        concurrency: int = 1,
         options: Optional[Dict[str, Any]] = None,
         model: Optional[str] = None,
         splitter: Optional[Callable[[List[Dict[str, str]]], List[Dict[str, str]]]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Asynchronously searches for documents using DuckDuckGo to obtain URLs based on a keyword,
-        then retrieves and ranks their content (using Docsifer and the ranking API). This function
-        returns results similar to query_documents_async.
+        then retrieves and ranks their content using Docsifer and the ranking API.
         
         Args:
-            query: The search keyword (used for both DuckDuckGo and ranking).
+            query: The search keyword.
             limit: Maximum number of DuckDuckGo results.
             blocklist: Optional list of domain substrings to filter out.
             openai_config: Optional Docsifer configuration.
             settings: Additional Docsifer settings.
-            concurrency: Max concurrency for retrieval.
-            options: Dict of additional options. Use {"embeddings": True} to include embeddings.
+            concurrency: Maximum concurrency for retrieval.
+            options: Additional options (e.g., {"embeddings": True}).
             model: Model name for ranking (defaults to self.default_model).
-            splitter: Optional callable to split document content.
+            splitter: Optional callable to further split document content.
         
         Returns:
             A list of ranked documents with keys "filename", "markdown", "probability",
@@ -819,11 +906,11 @@ class Embs:
     def search_documents(
         self,
         query: str,
-        limit: int = 10,
+        limit: int = 5,
         blocklist: Optional[List[str]] = None,
         openai_config: Optional[Dict[str, Any]] = None,
         settings: Optional[Dict[str, Any]] = None,
-        concurrency: int = 5,
+        concurrency: int = 1,
         options: Optional[Dict[str, Any]] = None,
         model: Optional[str] = None,
         splitter: Optional[Callable[[List[Dict[str, str]]], List[Dict[str, str]]]] = None,
@@ -849,9 +936,13 @@ class Embs:
     def cosine_similarity(a: np.ndarray, b: np.ndarray) -> np.ndarray:
         """
         Computes the pairwise cosine similarity between all rows of a and b.
-        a: (N, D)
-        b: (M, D)
-        Returns: (N, M) matrix of cosine similarities.
+        
+        Args:
+            a: A NumPy array of shape (N, D).
+            b: A NumPy array of shape (M, D).
+        
+        Returns:
+            A (N x M) matrix of cosine similarities.
         """
         a_norm = a / (np.linalg.norm(a, axis=1, keepdims=True) + 1e-9)
         b_norm = b / (np.linalg.norm(b, axis=1, keepdims=True) + 1e-9)
@@ -861,6 +952,12 @@ class Embs:
     def softmax(scores: np.ndarray) -> np.ndarray:
         """
         Applies the standard softmax function along the last dimension.
+        
+        Args:
+            scores: A NumPy array of scores.
+        
+        Returns:
+            A NumPy array of softmax probabilities.
         """
         exps = np.exp(scores - np.max(scores, axis=-1, keepdims=True))
         return exps / np.sum(exps, axis=-1, keepdims=True)
