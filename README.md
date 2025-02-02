@@ -13,10 +13,20 @@
   - DuckDuckGo-powered **web search** retrieves and ranks relevant documents.
   - Supports **PDFs, Word, HTML, Markdown**, and more.
 
-- **Optimized for RAG & Chatbots**:
+- **Optimized for RAG, Chatbots & Multilingual Search**:
 
   - **Automatic document chunking (Splitter) for improved retrieval accuracy.**
   - Rank documents **by relevance to a query**.
+  - **Strong multilingual model support** for global applications.
+    ✅ Supported multilingual models:
+    - `snowflake-arctic-embed-l-v2.0`
+    - `bge-m3`
+    - `gte-multilingual-base`
+    - `paraphrase-multilingual-MiniLM-L12-v2`
+    - `paraphrase-multilingual-mpnet-base-v2`
+    - `multilingual-e5-small`
+    - `multilingual-e5-base`
+    - `multilingual-e5-large`
 
 - **Fast & Efficient**:
 
@@ -24,6 +34,7 @@
   - **Flexible batch embedding with cache optimization**.
 
 - **Scalable & Customizable**:
+
   - Works with **synchronous & asynchronous processing**.
   - Supports **custom splitting rules**.
 
@@ -39,7 +50,7 @@ For Poetry users:
 
 ```toml
 [tool.poetry.dependencies]
-embs = "^0.1.7"
+embs = "^0.1.8"
 ```
 
 ## 📖 Quick Start Guide
@@ -59,8 +70,9 @@ from embs import Embs
 # Configure a Markdown-based splitter
 split_config = {
     "headers_to_split_on": [("#", "h1"), ("##", "h2"), ("###", "h3")],
-    "return_each_line": False,
+    "return_each_line": True,
     "strip_headers": True,
+    "split_on_double_newline": True,
 }
 md_splitter = partial(Embs.markdown_splitter, config=split_config)
 
@@ -69,13 +81,12 @@ client = Embs()
 async def run_search():
     results = await client.search_documents_async(
         query="Latest AI research",
-        limit=5,
+        limit=3,
         blocklist=["youtube.com"],  # Exclude unwanted domains
         splitter=md_splitter,  # Enable smart chunking
-        options={"embeddings": True}
     )
     for item in results:
-        print(f"File: {item['filename']} | Score: {item['probability']:.4f}")
+        print(f"File: {item['filename']} | Score: {item['similarity']:.4f}")
         print(f"Snippet: {item['markdown'][:80]}...\n")
 
 asyncio.run(run_search())
@@ -86,30 +97,29 @@ For **synchronous usage**:
 ```python
 results = client.search_documents(
     query="Latest AI research",
-    limit=5,
+    limit=3,
     blocklist=["youtube.com"],
     splitter=md_splitter,  # Always use a splitter
-    options={"embeddings": True}
+    model="snowflake-arctic-embed-l-v2.0",
 )
 for item in results:
-    print(f"File: {item['filename']} | Score: {item['probability']:.4f}")
+    print(f"File: {item['filename']} | Score: {item['similarity']:.4f}")
 ```
 
-### 2️⃣ Querying Local & Online Documents with Ranking
+### 2️⃣ Multilingual Document Querying (Local & Online)
 
-Retrieve and **rank documents from local files or URLs**.
+Retrieve and **rank multilingual documents from local files or URLs**.
 
 ```python
 async def run_query():
     docs = await client.query_documents_async(
-        query="Explain quantum computing",
+        query="Explique la mécanique quantique",  # French query
         files=["/path/to/quantum_theory.pdf"],
         urls=["https://example.com/quantum.html"],
         splitter=md_splitter,  # Chunking for better retrieval
-        options={"embeddings": True}
     )
     for d in docs:
-        print(f"{d['filename']} => Score: {d['probability']:.4f}")
+        print(f"{d['filename']} => Score: {d['similarity']:.4f}")
         print(f"Snippet: {d['markdown'][:80]}...\n")
 
 asyncio.run(run_query())
@@ -119,14 +129,15 @@ For **synchronous usage**:
 
 ```python
 docs = client.query_documents(
-    query="Explain quantum computing",
+    query="Explique la mécanique quantique",
     files=["/path/to/quantum_theory.pdf"],
     splitter=md_splitter,
-    options={"embeddings": True}
 )
 for d in docs:
-    print(d["filename"], "=> Score:", d["probability"])
+    print(d["filename"], "=> Score:", d["similarity"])
 ```
+
+💡 **Perfect for multilingual retrieval!** Whether you're searching documents in English, French, Spanish, German, or other supported languages, `embs` ensures optimal ranking and retrieval.
 
 ## ⚡ Caching for Performance
 
@@ -154,16 +165,11 @@ client = Embs(cache_config=cache_conf)
 ```python
 await client.search_documents_async(
     query="Recent AI breakthroughs",
-    limit=5,
+    limit=3,
     blocklist=["example.com"],
     splitter=md_splitter
 )
 ```
-
-- `query`: Search term.
-- `limit`: Number of DuckDuckGo results.
-- `blocklist`: Exclude **unwanted domains**.
-- `splitter`: Smart **chunking** for better ranking.
 
 ### 🔹 `query_documents_async()`
 
@@ -175,31 +181,19 @@ await client.query_documents_async(
     files=["/path/to/report.pdf"],
     urls=["https://example.com"],
     splitter=md_splitter,
-    options={"embeddings": True}
 )
 ```
-
-- `query`: Search query.
-- `files`: List of **file paths**.
-- `urls`: List of **webpage URLs**.
-- `splitter`: Function to **split** document chunks.
-- `options`: Set `{"embeddings": True}` to include embeddings.
 
 ### 🔹 `embed_async()`
 
-**Generate embeddings for texts.**  
-By default, it processes one item at a time for **better cache efficiency**.
+**Generate embeddings for texts with multilingual support.**  
 
 ```python
 embeddings = await client.embed_async(
-    ["This is a test sentence.", "Another sentence."],
+    ["Este es un ejemplo de texto.", "Ceci est un exemple de phrase."],
     optimized=True  # Process one at a time for better caching
 )
 ```
-
-- `text_or_texts`: Single **string** or **list of texts**.
-- `optimized`: **`True`** = Process **one-by-one** (better cache).  
-  **`False`** = Process in **batches of 4** (faster, but higher API load).
 
 ### 🔹 `rank_async()`
 
@@ -212,14 +206,6 @@ ranked_results = await client.rank_async(
 )
 ```
 
-- `query`: **Search query**.
-- `candidates`: List of **text snippets** to rank.
-
-Returns a **sorted list** of items with:
-
-- `"probability"` (higher = more relevant)
-- `"cosine_similarity"`
-
 ## 🔬 Testing
 
 Run **pytest** and **pytest-asyncio** for automated testing:
@@ -230,12 +216,6 @@ pytest --asyncio-mode=auto
 
 ## 📝 Best Practices: Always Use a Splitter!
 
-**Why use a splitter?**
-
-- **Improves retrieval** by processing **smaller chunks** of text.
-- **Reduces token usage** when embedding & ranking.
-- **Faster performance** in RAG and chatbot applications.
-
 ### ✅ How to Use the Built-in Markdown Splitter
 
 ```python
@@ -243,13 +223,13 @@ from functools import partial
 
 split_config = {
     "headers_to_split_on": [("#", "h1"), ("##", "h2"), ("###", "h3")],
-    "return_each_line": False,
+    "return_each_line": True,
     "strip_headers": True,
+    "split_on_double_newline": True,
 }
 
 md_splitter = partial(Embs.markdown_splitter, config=split_config)
 
-# Use it when querying documents
 docs = client.query_documents(
     query="Machine Learning Basics",
     files=["/path/to/ml_guide.pdf"],
@@ -265,4 +245,4 @@ Licensed under **MIT License**. See [LICENSE](./LICENSE) for details.
 
 Pull requests, issues, and discussions are welcome!
 
-With this enhanced documentation, `embs` is now even **easier to use and more efficient! 🚀**
+🚀 With enhanced **multilingual support**, `embs` is now even more powerful for global retrieval applications! 🌍

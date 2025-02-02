@@ -299,7 +299,7 @@ def test_sync_wrapper_search_documents():
     """
     embs = Embs()
     fake_return = [
-        {"filename": "mock.pdf", "markdown": "demo", "probability": 1.0, "cosine_similarity": 0.95}
+        {"filename": "mock.pdf", "markdown": "demo", "probability": 1.0, "similarity": 0.95}
     ]
 
     async def mock_async(*args, **kwargs):
@@ -316,7 +316,7 @@ def test_sync_wrapper_query_documents():
     """
     embs = Embs()
     fake_return = [
-        {"filename": "mock_query.pdf", "markdown": "demo", "probability": 0.9, "cosine_similarity": 0.85}
+        {"filename": "mock_query.pdf", "markdown": "demo", "probability": 0.9, "similarity": 0.85}
     ]
 
     async def mock_async(*args, **kwargs):

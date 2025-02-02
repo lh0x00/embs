@@ -41,114 +41,150 @@ def _split_markdown_text(
     text: str,
     headers_to_split_on: List[Tuple[str, str]],
     return_each_line: bool,
-    strip_headers: bool
+    strip_headers: bool,
+    max_characters: Optional[int] = None,
+    split_on_double_newline: bool = False
 ) -> List[str]:
     """
-    Splits a markdown string into chunks based on specified header markers.
-    
+    Optimized splitting of a markdown string into chunks based on specified header markers.
+
+    This function iterates through the text line‐by‐line (using splitlines, which is more efficient
+    than split("\\n") for varied newline conventions) and:
+      - Filters out non-printable characters from each line.
+      - Detects code blocks using common fences (~~~ or ```); lines inside a code block are not scanned
+        for headers.
+      - When a header (one of the specified markers) is detected, the current content block is flushed.
+        A header stack is maintained so that nested headers correctly update the metadata.
+      - Optionally, if return_each_line is True, each nonblank word (separated by " ") is returned as its own chunk.
+      - Otherwise, consecutive blocks sharing the same metadata are merged.
+      - Finally, after header splitting:
+            * If split_on_double_newline is True, each merged chunk is further split on double newline ("\n\n").
+            * Else if max_characters is set (> 0), any chunk longer than max_characters is further split into pieces.
+
     Args:
         text: Full markdown text.
         headers_to_split_on: A list of (header_prefix, header_name) pairs.
-        return_each_line: If True, each nonblank line is its own chunk.
+        return_each_line: If True, each nonblank word (separated by " ") is its own chunk.
         strip_headers: If True, header lines are not included in the chunks.
-    
+        max_characters: Maximum number of characters per chunk (default=None).
+        split_on_double_newline: If True, further split each chunk by double newline ("\n\n")
+                                   instead of using max_characters.
+
     Returns:
         List of chunk strings.
     """
-    # Sort header markers descending by length so that longer markers match first.
+    # Sort header markers in descending order by prefix length so that longer markers match first.
     headers_to_split_on = sorted(headers_to_split_on, key=lambda x: len(x[0]), reverse=True)
+    # Pre-calculate header markers: (prefix, header_name, prefix_length, header_level)
+    header_markers = [(prefix, name, len(prefix), prefix.count("#")) for prefix, name in headers_to_split_on]
 
     lines_with_metadata: List[Dict[str, Any]] = []
-    raw_lines = text.split("\n")
-
-    in_code_block = False
-    opening_fence = ""
-
     current_content: List[str] = []
+    header_stack: List[Tuple[str, int]] = []  # Each element is (header_name, header_level)
     current_metadata: Dict[str, str] = {}
 
-    header_stack: List[Dict[str, Union[int, str]]] = []
-    active_metadata: Dict[str, str] = {}
+    in_code_block = False
+    code_fence = ""
 
-    def flush_current():
+    def flush_block() -> None:
+        nonlocal current_content
         if current_content:
+            # Append the current block (joined by newline) along with a copy of current metadata.
             lines_with_metadata.append({
                 "content": "\n".join(current_content),
                 "metadata": current_metadata.copy()
             })
-            current_content.clear()
+            current_content = []
 
-    for line in raw_lines:
-        stripped_line = "".join(ch for ch in line.strip() if ch.isprintable())
+    for line in text.splitlines():
+        # Remove leading/trailing whitespace and filter out non-printable characters.
+        stripped_line = ''.join(ch for ch in line.strip() if ch.isprintable())
 
-        # Detect code blocks.
+        # Detect code blocks using common fences.
         if not in_code_block:
-            if stripped_line.startswith("</code></pre>") and stripped_line.count("<pre class=" 'overflow-x-auto"><code>') == 1:
+            if stripped_line.startswith("~~~") or stripped_line.startswith("```"):
                 in_code_block = True
-                opening_fence = "</code></pre>"
-            elif stripped_line.startswith("~~~"):
-                in_code_block = True
-                opening_fence = "~~~"
+                code_fence = stripped_line[:3]
         else:
-            if stripped_line.startswith(opening_fence):
+            if stripped_line.startswith(code_fence):
                 in_code_block = False
-                opening_fence = ""
-        if in_code_block:
+                code_fence = ""
             current_content.append(stripped_line)
             continue
 
-        found_header = False
-        for sep, name in headers_to_split_on:
-            if stripped_line.startswith(sep) and (len(stripped_line) == len(sep) or stripped_line[len(sep)] == " "):
-                found_header = True
-                current_level = sep.count("#")
-                while header_stack and header_stack[-1]["level"] >= current_level:
-                    popped = header_stack.pop()
-                    active_metadata.pop(popped["name"], None)
-                header_stack.append({
-                    "level": current_level,
-                    "name": name,
-                    "data": stripped_line[len(sep):].strip()
-                })
-                active_metadata[name] = header_stack[-1]["data"]
-                flush_current()
+        # Check if the line is a header.
+        header_found = False
+        for prefix, name, plen, level in header_markers:
+            if stripped_line.startswith(prefix) and (len(stripped_line) == plen or stripped_line[plen] == " "):
+                header_found = True
+                flush_block()
+                # Pop headers from the stack that have a level greater than or equal to the current.
+                while header_stack and header_stack[-1][1] >= level:
+                    popped_name, _ = header_stack.pop()
+                    current_metadata.pop(popped_name, None)
+                header_text = stripped_line[plen:].strip()
+                header_stack.append((name, level))
+                current_metadata[name] = header_text
                 if not strip_headers:
                     current_content.append(stripped_line)
                 break
 
-        if not found_header:
+        if not header_found:
             if stripped_line:
                 current_content.append(stripped_line)
             else:
-                flush_current()
-        current_metadata = active_metadata.copy()
+                flush_block()
 
-    flush_current()
+    flush_block()
 
+    # If each nonblank word should be its own chunk, split blocks using the space character.
     if return_each_line:
-        final_chunks = []
-        for item in lines_with_metadata:
-            for single_line in item["content"].split("\n"):
-                if single_line.strip():
-                    final_chunks.append(single_line)
+        chunks: List[str] = []
+        for block in lines_with_metadata:
+            # Use split(" ") to split strictly on the space character.
+            for word in block["content"].split(" "):
+                if word != "":
+                    chunks.append(word)
+    else:
+        # Merge consecutive blocks that share the same metadata.
+        merged: List[str] = []
+        if lines_with_metadata:
+            current_block = lines_with_metadata[0]["content"]
+            current_meta = lines_with_metadata[0]["metadata"]
+            for item in lines_with_metadata[1:]:
+                if item["metadata"] == current_meta:
+                    current_block += "\n" + item["content"]
+                else:
+                    merged.append(current_block)
+                    current_block = item["content"]
+                    current_meta = item["metadata"]
+            merged.append(current_block)
+        else:
+            merged = [text]  # Fallback: if nothing was split, return the original text.
+        chunks = merged
+
+    # If the flag to split by double newline is enabled, further split each chunk by "\n\n".
+    if split_on_double_newline:
+        final_chunks: List[str] = []
+        for chunk in chunks:
+            pieces = chunk.split("\n\n")
+            for piece in pieces:
+                if piece.strip():
+                    final_chunks.append(piece.strip())
         return final_chunks
 
-    final_chunks = []
-    temp_block = None
-    temp_meta = None
-    for item in lines_with_metadata:
-        txt = item["content"]
-        meta = item["metadata"]
-        if temp_block is not None and meta == temp_meta:
-            temp_block += "\n" + txt
-        else:
-            if temp_block is not None:
-                final_chunks.append(temp_block)
-            temp_block = txt
-            temp_meta = meta
-    if temp_block is not None:
-        final_chunks.append(temp_block)
-    return final_chunks
+    # Otherwise, if max_characters is enforced (> 0), further split any chunk that exceeds the limit.
+    if max_characters and max_characters > 0:
+        final_chunks: List[str] = []
+        for chunk in chunks:
+            if len(chunk) <= max_characters:
+                final_chunks.append(chunk)
+            else:
+                for i in range(0, len(chunk), max_characters):
+                    final_chunks.append(chunk[i:i + max_characters])
+        return final_chunks
+
+    return chunks
 
 
 class Embs:
@@ -213,7 +249,6 @@ class Embs:
                 raise ValueError('If "type"=="disk", you must provide "dir" in cache_config.')
             os.makedirs(self.cache_dir, exist_ok=True)
 
-    @staticmethod
     def markdown_splitter(
         docs: List[Dict[str, str]],
         config: Optional[Dict[str, Any]] = None
@@ -225,19 +260,23 @@ class Embs:
             docs: A list of documents, each with "filename" and "markdown".
             config: Configuration dict for splitting. Keys:
                 - headers_to_split_on: List of (str, str) pairs.
-                - return_each_line: bool.
+                - return_each_line: bool (if True, each nonblank word is its own chunk).
                 - strip_headers: bool.
+                - max_characters: int (default=2048)
+                - split_on_double_newline: bool (if True, further split each chunk on "\n\n").
         
         Returns:
             A list of documents with subdivided chunks.
         """
         if config is None:
             config = {}
-
-        headers_to_split_on = config.get("headers_to_split_on", [("#", "h1"), ("##", "h2")])
+    
+        headers_to_split_on = config.get("headers_to_split_on", [("#", "h1"), ("##", "h2"), ("###", "h3")])
         return_each_line = config.get("return_each_line", False)
         strip_headers = config.get("strip_headers", True)
-
+        max_characters = config.get("max_characters", None)
+        split_on_double_newline = config.get("split_on_double_newline", False)
+    
         output_docs: List[Dict[str, str]] = []
         for doc in docs:
             original_filename = doc["filename"]
@@ -246,7 +285,9 @@ class Embs:
                 text,
                 headers_to_split_on=headers_to_split_on,
                 return_each_line=return_each_line,
-                strip_headers=strip_headers
+                strip_headers=strip_headers,
+                max_characters=max_characters,
+                split_on_double_newline=split_on_double_newline
             )
             if not chunks:
                 output_docs.append(doc)
@@ -663,7 +704,7 @@ class Embs:
             model: The model name (defaults to self.default_model if not provided).
         
         Returns:
-            A list of ranking dictionaries with keys "text", "probability", and "cosine_similarity".
+            A list of ranking dictionaries with keys "text", "probability", and "similarity".
         """
         if model is None:
             model = self.default_model
@@ -695,7 +736,7 @@ class Embs:
             candidate_embeds = np.array(candidate_embeds)
         
         # Compute cosine similarity.
-        sim_matrix = self.cosine_similarity(query_embeds, candidate_embeds)
+        sim_matrix = self.similarity(query_embeds, candidate_embeds)
         logit_scale = 1.0
         scaled = sim_matrix * logit_scale
         probs = self.softmax(scaled)
@@ -715,7 +756,7 @@ class Embs:
             results.append({
                 "text": text_val,
                 "probability": probs[0][i],
-                "cosine_similarity": sim_matrix[0][i],
+                "similarity": sim_matrix[0][i],
             })
         
         results.sort(key=lambda x: x["probability"], reverse=True)
@@ -751,7 +792,7 @@ class Embs:
             splitter: Optional callable to further split document content.
         
         Returns:
-            A list of documents with keys "filename", "markdown", "probability", "cosine_similarity",
+            A list of documents with keys "filename", "markdown", "probability", "similarity",
             and optionally "embeddings".
         """
         docs = await self.retrieve_documents_async(
@@ -793,7 +834,7 @@ class Embs:
                     "filename": matched_doc["filename"],
                     "markdown": matched_doc["markdown"],
                     "probability": item["probability"],
-                    "cosine_similarity": item["cosine_similarity"]
+                    "similarity": item["similarity"]
                 })
 
         # Attach embeddings if requested.
@@ -900,7 +941,7 @@ class Embs:
         
         Returns:
             A list of ranked documents with keys "filename", "markdown", "probability",
-            "cosine_similarity", and optionally "embeddings".
+            "similarity", and optionally "embeddings".
         """
         urls = await self._duckduckgo_search(query, limit=limit, blocklist=blocklist)
         return await self.query_documents_async(
@@ -944,7 +985,7 @@ class Embs:
         )
 
     @staticmethod
-    def cosine_similarity(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    def similarity(a: np.ndarray, b: np.ndarray) -> np.ndarray:
         """
         Computes the pairwise cosine similarity between all rows of a and b.
         
@@ -976,7 +1017,7 @@ class Embs:
     @staticmethod
     def estimate_tokens(input_data: Union[str, List[str]]) -> int:
         """
-        Estimates token count for the input text(s) by counting whitespace-separated tokens.
+        Estimates token count for the input text(s) by counting words separated by a space (" ").
         
         Args:
             input_data: A string or a list of strings.
@@ -985,9 +1026,9 @@ class Embs:
             Estimated token count as an integer.
         """
         if isinstance(input_data, str):
-            return len(input_data.split())
+            return len([w for w in input_data.split(" ") if w != ""])
         elif isinstance(input_data, list):
-            return sum(len(text.split()) for text in input_data)
+            return sum(len([w for w in text.split(" ") if w != ""]) for text in input_data)
         else:
             return 0
 
@@ -1000,8 +1041,9 @@ class Embs:
 #
 # split_config = {
 #     "headers_to_split_on": [("#", "h1"), ("##", "h2"), ("###", "h3")],
-#     "return_each_line": False,
+#     "return_each_line": True,   # Each nonblank word (split by " ") becomes its own chunk.
 #     "strip_headers": True,
+#     "split_on_double_newline": True  # Further split each header chunk by double newline ("\n\n")
 # }
 # md_splitter = partial(Embs.markdown_splitter, config=split_config)
 #
