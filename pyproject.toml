@@ -1,7 +1,7 @@
 [tool.poetry]
 name = "embs"
-version = "0.1.3"
-description = "Embs is a Python toolkit for retrieving documents (via Docsifer), generating embeddings (via Lightweight Embeddings API), and ranking texts with an optional caching system."
+version = "0.1.4"
+description = "Embs is a lightweight Python toolkit for document retrieval, embedding generation, and ranking—ideal for RAG-based AI, chatbots, and search systems with caching support."
 authors = ["Hieu Lam <lamhieu.vk@gmail.com>"]
 readme = "README.md"
 
@@ -36,16 +36,23 @@ reportMissingModuleSource = false
 license = "MIT"
 keywords = [
   "embs",
+  "retrieval-augmented-generation",
+  "RAG",
   "docsifer",
   "embeddings",
+  "semantic-search",
   "ranking",
-  "document-retrieval",
+  "document-processing",
+  "chatbots",
+  "AI-agent",
+  "web-scraping",
+  "knowledge-retrieval",
   "caching",
-  "lru",
+  "lru-cache",
   "disk-cache",
-  "in-memory-cache",
   "async",
   "aiohttp",
+  "duckduckgo",
   "python-3.10+"
 ]
 classifiers = [
@@ -53,11 +60,14 @@ classifiers = [
     "Intended Audience :: Developers",
     "Intended Audience :: Information Technology",
     "Intended Audience :: System Administrators",
+    "Intended Audience :: Science/Research",
 
     # Topics
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Topic :: Software Development :: Libraries",
     "Topic :: Software Development :: Utilities",
+    "Topic :: Information Retrieval",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: System :: Distributed Computing",
 
     # License
@@ -66,10 +76,10 @@ classifiers = [
     # Supported Python versions
     "Programming Language :: Python",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.6",
     "Programming Language :: Python :: 3.7",
     "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11"
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12"
 ]
